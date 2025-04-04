@@ -4,12 +4,67 @@ from googleapiclient.discovery import build
 from youtube_transcript_api import YouTubeTranscriptApi
 from typing import List, Optional
 import os
+import asyncio
+import random
+import httpx
+import logging
+from contextlib import asynccontextmanager
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Keep track of the ping task
+ping_task = None
+
+# Create a startup event to start the ping task
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Start the ping task
+    global ping_task
+    ping_task = asyncio.create_task(keep_alive())
+
+    yield
+
+    # Cancel the ping task on shutdown
+    if ping_task:
+        ping_task.cancel()
+        try:
+            await ping_task
+        except asyncio.CancelledError:
+            logger.info("Ping task cancelled")
 
 # Initialize FastAPI app
 app = FastAPI(
     title="YouTube Data API",
-    description="API to fetch YouTube titles, thumbnails, and transcriptions"
+    description="API to fetch YouTube titles, thumbnails, and transcriptions",
+    lifespan=lifespan
 )
+
+# Self-ping function to keep the instance alive
+async def keep_alive():
+    # Get the app URL from environment variable or use a default for local development
+    app_url = os.environ.get("RENDER_EXTERNAL_URL", "http://localhost:8000")
+    health_endpoint = f"{app_url}/health"
+
+    while True:
+        try:
+            # Randomize the interval between 7 and 12 minutes (420-720 seconds)
+            interval = random.randint(420, 720)
+            logger.info(f"Next ping in {interval} seconds")
+
+            # Wait for the interval
+            await asyncio.sleep(interval)
+
+            # Ping the health endpoint
+            async with httpx.AsyncClient() as client:
+                response = await client.get(health_endpoint)
+                logger.info(f"Ping status: {response.status_code}")
+
+        except Exception as e:
+            logger.error(f"Error in keep-alive ping: {str(e)}")
+            # Even if we encounter an error, wait before trying again
+            await asyncio.sleep(300)  # 5 minutes
 
 # API Security setup
 API_KEY_NAME = "X-API-Key"
@@ -23,6 +78,12 @@ async def get_api_key(api_key: str = Depends(api_key_header)):
     if api_key != os.environ.get("API_KEY", "your-api-key-here"):
         raise HTTPException(status_code=403, detail="Could not validate API key")
     return api_key
+
+# Health check endpoint
+@app.get("/health")
+async def health_check():
+    return {"status": "ok", "message": "Service is running"}
+
 
 @app.get("/get_title")
 async def get_title(
